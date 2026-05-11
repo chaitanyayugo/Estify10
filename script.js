@@ -1,6 +1,8 @@
 // =====================================================
-// ESTIFY • UNIFIED PRICING ENGINE
-// FINAL CLEAN READY-TO-PASTE VERSION
+// ESTIFY • ONE TEMPLATE / MANY VARIANTS
+// Model = one sofa template
+// Variant = colour + configuration
+// Price = base + colour extra + config extra
 // =====================================================
 
 let material_master = [];
@@ -36,10 +38,7 @@ async function loadData() {
 // HELPERS
 // =====================================================
 function normalize(v) {
-  return String(v ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toUpperCase();
+  return String(v ?? "").trim().replace(/\s+/g, " ").toUpperCase();
 }
 
 function escapeHtml(v) {
@@ -141,10 +140,7 @@ function looksLikeConfig(value) {
     /^\d+X\d+([A-Z]+)?$/.test(v) ||
     /^[A-Z]?\d+(\.\d+)?S$/.test(v) ||
     /^[A-Z]?\d+(\.\d+)?SS$/.test(v) ||
-    (
-      /^[A-Z]{1,4}\d+[A-Z0-9\-_/]*$/.test(v) &&
-      !isMaterialCode(v)
-    ) ||
+    (/^[A-Z]{1,4}\d+[A-Z0-9\-_/]*$/.test(v) && !isMaterialCode(v)) ||
     v.includes("+") ||
     /^LHF$/i.test(v) ||
     /^RHF$/i.test(v) ||
@@ -159,6 +155,21 @@ function looksLikeConfig(value) {
     /^WBF$/i.test(v) ||
     /^RFSTB$/i.test(v)
   );
+}
+
+function chooseMostCommon(values) {
+  const counts = new Map();
+  const order = [];
+
+  for (const v of values) {
+    if (!counts.has(v)) order.push(v);
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+
+  return order.sort((a, b) => {
+    const diff = (counts.get(b) || 0) - (counts.get(a) || 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  })[0];
 }
 
 // =====================================================
@@ -185,9 +196,7 @@ function extractCode(fabricPart) {
 }
 
 function parseVariant(input) {
-  input = String(input || "")
-    .trim()
-    .replace(/\s+/g, " ");
+  input = String(input || "").trim().replace(/\s+/g, " ");
 
   // RAW FORMAT
   if (isRawLine(input)) {
@@ -214,17 +223,12 @@ function parseVariant(input) {
     throw new Error(`Invalid bracket format: ${input}`);
   }
 
-  const prefix = brackets[0]
-    .replace(/[()]/g, "")
-    .trim();
-
+  const prefix = brackets[0].replace(/[()]/g, "").trim();
   const afterPrefix = input.split(")")[1]?.trim() || "";
   const modelName = afterPrefix.split(" ")[0];
   const model = `${prefix}-${modelName}`;
 
-  const last = brackets[brackets.length - 1]
-    .replace(/[()]/g, "")
-    .trim();
+  const last = brackets[brackets.length - 1].replace(/[()]/g, "").trim();
 
   let fabricPart = "";
   let configPart = "";
@@ -242,7 +246,7 @@ function parseVariant(input) {
     configPart = pieces.slice(1).join(" ").trim();
   }
 
-  // SMART SWAP
+  // Smart swap if they are reversed
   if (isMaterialCode(configPart) && !isMaterialCode(fabricPart)) {
     [fabricPart, configPart] = [configPart, fabricPart];
   } else if (looksLikeConfig(fabricPart) && !looksLikeConfig(configPart)) {
@@ -294,7 +298,6 @@ function getFinalPrice(model, config, grade) {
   const findRow = (cfg) => {
     const normalizedCfg = normalize(cfg);
 
-    // EXACT: model + config + grade
     let row = price_sheet.find(p =>
       normalize(p.model) === safeModel &&
       normalize(p.config) === normalizedCfg &&
@@ -302,7 +305,6 @@ function getFinalPrice(model, config, grade) {
     );
     if (row) return row;
 
-    // MODEL + CONFIG only
     row = price_sheet.find(p =>
       normalize(p.model) === safeModel &&
       normalize(p.config) === normalizedCfg
@@ -312,7 +314,6 @@ function getFinalPrice(model, config, grade) {
     return null;
   };
 
-  // COMBO CONFIGS
   if (safeConfig.includes("+")) {
     return safeConfig.split("+").reduce((sum, part) => {
       const row = findRow(part);
@@ -333,40 +334,188 @@ function getFinalPrice(model, config, grade) {
 }
 
 // =====================================================
-// SMART EXACT ENGINE
+// LINEAR SOLVER
 // =====================================================
-function generateUnifiedPlan(results, tolerance = 10) {
-  if (!results?.length) {
-    return null;
+function solveLinearSystem(A, b) {
+  const n = A.length;
+  const M = A.map((row, i) => row.slice().concat([b[i]]));
+
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) {
+        pivot = r;
+      }
+    }
+
+    if (Math.abs(M[pivot][col]) < 1e-12) {
+      throw new Error("Underdetermined system");
+    }
+
+    if (pivot !== col) {
+      [M[pivot], M[col]] = [M[col], M[pivot]];
+    }
+
+    const div = M[col][col];
+    for (let c = col; c <= n; c++) {
+      M[col][c] /= div;
+    }
+
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = M[r][col];
+      if (!factor) continue;
+
+      for (let c = col; c <= n; c++) {
+        M[r][c] -= factor * M[col][c];
+      }
+    }
   }
 
-  const base = results.reduce((a, b) =>
-    Number(b.price) < Number(a.price) ? b : a
-  );
+  return M.map(row => row[n]);
+}
 
-  const basePrice = Number(base.price);
+function solveLeastSquares(X, y) {
+  const m = X.length;
+  const n = X[0].length;
 
-  const colourExtras = {
-    [base.code]: 0
-  };
+  const XtX = Array.from({ length: n }, () => Array(n).fill(0));
+  const Xty = Array(n).fill(0);
 
-  const configExtras = {
-    [base.config]: 0
-  };
+  for (let i = 0; i < m; i++) {
+    for (let a = 0; a < n; a++) {
+      const xa = X[i][a];
+      Xty[a] += xa * y[i];
 
-  // CONFIG EXTRAS
-  results
-    .filter(r => r.code === base.code)
-    .forEach(r => {
-      configExtras[r.config] = Number(r.price) - basePrice;
+      for (let b = 0; b < n; b++) {
+        XtX[a][b] += xa * X[i][b];
+      }
+    }
+  }
+
+  // tiny stabilizer
+  for (let i = 0; i < n; i++) {
+    XtX[i][i] += 1e-8;
+  }
+
+  return solveLinearSystem(XtX, Xty);
+}
+
+// =====================================================
+// ODOO ATTRIBUTE ENGINE
+// =====================================================
+function generateUnifiedPlan(results, tolerance = 10) {
+  if (!results?.length) return null;
+
+  const model = results[0].model;
+
+  const colourCounts = {};
+  const configCounts = {};
+
+  for (const r of results) {
+    colourCounts[r.code] = (colourCounts[r.code] || 0) + 1;
+    configCounts[r.config] = (configCounts[r.config] || 0) + 1;
+  }
+
+  const colours = [...new Set(results.map(r => r.code))].sort((a, b) => {
+    const diff = (colourCounts[b] || 0) - (colourCounts[a] || 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
+
+  const configs = [...new Set(results.map(r => r.config))].sort((a, b) => {
+    const diff = (configCounts[b] || 0) - (configCounts[a] || 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
+
+  const anchorColour = chooseMostCommon(colours);
+  const anchorConfig = chooseMostCommon(configs);
+
+  const colourVars = colours.filter(c => c !== anchorColour);
+  const configVars = configs.filter(k => k !== anchorConfig);
+
+  const colourIndex = new Map(colourVars.map((c, i) => [c, i]));
+  const configIndex = new Map(configVars.map((k, i) => [k, i]));
+
+  const X = [];
+  const y = [];
+
+  for (const r of results) {
+    const row = new Array(1 + colourVars.length + configVars.length).fill(0);
+    row[0] = 1;
+
+    if (r.code !== anchorColour && colourIndex.has(r.code)) {
+      row[1 + colourIndex.get(r.code)] = 1;
+    }
+
+    if (r.config !== anchorConfig && configIndex.has(r.config)) {
+      row[1 + colourVars.length + configIndex.get(r.config)] = 1;
+    }
+
+    X.push(row);
+    y.push(Number(r.price));
+  }
+
+  let beta;
+  try {
+    beta = solveLeastSquares(X, y);
+  } catch (err) {
+    // fallback to simple lowest-price anchor
+    const base = results.reduce((a, b) =>
+      Number(b.price) < Number(a.price) ? b : a
+    );
+
+    const basePrice = Number(base.price);
+
+    const colourExtras = { [base.code]: 0 };
+    const configExtras = { [base.config]: 0 };
+
+    const validation = results.map(r => {
+      const predicted = basePrice + (colourExtras[r.code] || 0) + (configExtras[r.config] || 0);
+      const diff = predicted - Number(r.price);
+
+      return {
+        ...r,
+        predicted,
+        diff,
+        fits: Math.abs(diff) <= tolerance,
+        status: Math.abs(diff) <= tolerance ? "EXACT" : "MISMATCH"
+      };
     });
 
-  // COLOUR EXTRAS
-  results
-    .filter(r => r.config === base.config)
-    .forEach(r => {
-      colourExtras[r.code] = Number(r.price) - basePrice;
-    });
+    const mismatches = validation.filter(v => !v.fits);
+    const maxDiff = mismatches.length ? Math.max(...mismatches.map(v => Math.abs(v.diff))) : 0;
+
+    return {
+      model,
+      grade: results[0].grade,
+      base,
+      basePrice,
+      anchorColour: base.code,
+      anchorConfig: base.config,
+      colourExtras,
+      configExtras,
+      validation,
+      mismatchCount: mismatches.length,
+      maxDiff,
+      tolerance,
+      forcedExact: maxDiff > tolerance,
+      pricingMode: maxDiff > tolerance ? "FORCED EXACT" : "SHARED ADDITIVE",
+      error: String(err)
+    };
+  }
+
+  const basePrice = beta[0];
+
+  const colourExtras = { [anchorColour]: 0 };
+  colourVars.forEach((c, i) => {
+    colourExtras[c] = beta[1 + i];
+  });
+
+  const configExtras = { [anchorConfig]: 0 };
+  configVars.forEach((k, i) => {
+    configExtras[k] = beta[1 + colourVars.length + i];
+  });
 
   const validation = results.map(r => {
     const predicted =
@@ -390,44 +539,31 @@ function generateUnifiedPlan(results, tolerance = 10) {
     ? Math.max(...mismatches.map(v => Math.abs(v.diff)))
     : 0;
 
-  const forcedExact = maxDiff > tolerance;
-
-  const exactOverrides = forcedExact
-    ? results.map(r => ({
-        model: r.model,
-        code: r.code,
-        config: r.config,
-        actual: Number(r.price)
-      }))
-    : [];
-
   return {
-    model: results[0].model,
+    model,
     grade: results[0].grade,
-    base,
+    base: results.reduce((a, b) =>
+      Number(b.price) < Number(a.price) ? b : a
+    ),
     basePrice,
-    anchorColour: base.code,
-    anchorConfig: base.config,
+    anchorColour,
+    anchorConfig,
     colourExtras,
     configExtras,
     validation,
-    exactOverrides,
     mismatchCount: mismatches.length,
     maxDiff,
     tolerance,
-    forcedExact,
-    pricingMode: forcedExact ? "FORCED EXACT" : "SHARED ADDITIVE"
+    forcedExact: maxDiff > tolerance,
+    pricingMode: maxDiff > tolerance ? "FORCED EXACT" : "SHARED ADDITIVE"
   };
 }
 
-// =====================================================
-// PLAN GENERATOR
-// =====================================================
 function generatePlans(results) {
   const grouped = {};
 
   for (const r of results) {
-    const key = `${normalize(r.model)}__${normalize(r.grade)}`;
+    const key = normalize(r.model);
     if (!grouped[key]) grouped[key] = [];
     grouped[key].push(r);
   }
@@ -438,9 +574,7 @@ function generatePlans(results) {
     const plan = generateUnifiedPlan(rows);
 
     if (plan) {
-      const [model, grade] = key.split("__");
-      plan.model = model;
-      plan.grade = grade;
+      plan.model = key;
       plan.groupKey = key;
     }
 
@@ -451,7 +585,7 @@ function generatePlans(results) {
 }
 
 // =====================================================
-// TABLE HELPERS
+// UI HELPERS
 // =====================================================
 function renderRows(obj = {}) {
   const entries = Object.entries(obj);
@@ -480,7 +614,7 @@ function renderValidationRows(plan) {
       <td>${escapeHtml(v.model)}</td>
       <td>${escapeHtml(v.code)}</td>
       <td>${escapeHtml(v.config)}</td>
-      <td>₹ ${formatPrecise(v.price ?? v.actual)}</td>
+      <td>₹ ${formatPrecise(v.price)}</td>
       <td>₹ ${formatPrecise(v.predicted)}</td>
       <td class="${v.fits ? "success" : "negative"}">
         ${v.fits ? "EXACT" : formatPrecise(v.diff)}
@@ -508,7 +642,7 @@ function displayResults(data, plans) {
       return;
     }
 
-    const key = `${normalize(d.model)}__${normalize(d.grade)}`;
+    const key = normalize(d.model);
     const plan = plans[key];
     const extra = Number(d.price) - Number(plan.basePrice);
 
@@ -552,7 +686,7 @@ function displayOdoo(plans) {
   }
   if (odooFit) {
     odooFit.textContent = first.forcedExact
-      ? `System auto-corrected mismatches → ALL EXACT`
+      ? `System auto-corrected mismatches → BEST FIT / REVIEW NEEDED`
       : `All variants fit additive pricing`;
   }
 
@@ -565,9 +699,6 @@ function displayOdoo(plans) {
   }
 }
 
-// =====================================================
-// PLAN CARD
-// =====================================================
 function renderPlanCard(modelKey, plan) {
   return `
     <section>
@@ -575,7 +706,7 @@ function renderPlanCard(modelKey, plan) {
         <div>
           <h3>${escapeHtml(modelKey)}</h3>
           <div style="margin-top:10px;color:#94a3b8;">
-            ${plan.forcedExact ? "Forced Exact Override Engine" : "Shared Attribute Pricing Engine"}
+            ${plan.forcedExact ? "Best-Fit / Review Needed" : "Shared Attribute Pricing Engine"}
           </div>
         </div>
 
@@ -636,34 +767,6 @@ function renderPlanCard(modelKey, plan) {
           </tbody>
         </table>
       </div>
-
-      ${
-        plan.forcedExact
-          ? `
-            <div class="card" style="margin-top:18px;">
-              <h3>Exact Override Result</h3>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Code</th>
-                    <th>Config</th>
-                    <th>Exact Price</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${plan.exactOverrides.map(v => `
-                    <tr>
-                      <td>${escapeHtml(v.code)}</td>
-                      <td>${escapeHtml(v.config)}</td>
-                      <td class="success">₹ ${formatPrecise(v.actual)}</td>
-                    </tr>
-                  `).join("")}
-                </tbody>
-              </table>
-            </div>
-          `
-          : ""
-      }
     </section>
   `;
 }
@@ -695,13 +798,13 @@ function buildPlanText(plan) {
     lines.push(`${k} = ${formatValue(v)}`);
   });
 
-  if (plan.forcedExact && plan.exactOverrides?.length) {
-    lines.push("");
-    lines.push("FORCED EXACT OVERRIDES");
-    plan.exactOverrides.forEach(v => {
-      lines.push(`${v.code} | ${v.config} = ${formatValue(v.actual)} (EXACT)`);
-    });
-  }
+  lines.push("");
+  lines.push("VALIDATION");
+  plan.validation.forEach(v => {
+    lines.push(
+      `${v.code} | ${v.config} | actual=${formatValue(v.price)} | predicted=${formatValue(v.predicted)} | diff=${formatPrecise(v.diff)}`
+    );
+  });
 
   return lines.join("\n");
 }
